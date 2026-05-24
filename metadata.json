@@ -1,0 +1,6 @@
+{
+  "name": "举一反三错题本",
+  "description": "基于 AI 识别错题、手动订正并自动生成 3 道举一反三相似题的变式强化练习和打印工具。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

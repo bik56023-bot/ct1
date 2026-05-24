@@ -1,0 +1,84 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Microsoft YaHei", sans-serif;
+  --font-serif: "Noto Serif SC", "Georgia", "Source Han Serif SC", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Custom continuous animations for scan and pulse elements */
+@keyframes scan {
+  0% { transform: translateY(0%); }
+  50% { transform: translateY(100%); }
+  100% { transform: translateY(0%); }
+}
+
+.animate-scan {
+  animation: scan 2s linear infinite;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.5);
+}
+
+/* Print layout optimizations */
+@media print {
+  /* Hide interactive screen-only elements */
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 12pt !important;
+    line-height: 1.5 !important;
+  }
+  
+  .no-print {
+    display: none !important;
+  }
+  
+  .print-only {
+    display: block !important;
+  }
+
+  .print-page-break {
+    page-break-before: always;
+  }
+  
+  .print-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  .print-card {
+    border: 1px solid #e5e7eb !important;
+    border-radius: 4px !important;
+    padding: 16px !important;
+    margin-bottom: 24px !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Force display of elements that might be styled as hidden or collapsed on screen */
+  .print-show {
+    display: block !important;
+    opacity: 1 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+}
+
