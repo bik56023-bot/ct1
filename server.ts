@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 
 // Load environment variables
@@ -14,29 +13,8 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Lazy initializer for Gemini client
-let aiInstance: GoogleGenAI | null = null;
-function getGeminiClient() {
-  if (!aiInstance) {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.API_KEY;
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-      console.warn("WARNING: GEMINI_API_KEY is not set or is using placeholder value.");
-      return null;
-    }
-    aiInstance = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
-  }
-  return aiInstance;
-}
-
 // -------------------------------------------------------------
-// Sample questions for mock / quick testing or when key is absent
+// Sample questions for mock / quick testing
 // -------------------------------------------------------------
 const SAMPLE_OCR_QUESTIONS = [
   {
@@ -86,7 +64,7 @@ const PREDEFINED_ANALOGIES: Record<string, any> = {
   },
   "sample_physics": {
     knowledgePoint: "牛顿第二定律与摩擦力方向判定问题",
-    difficultyAnalysis: "考核在传送带模型中，滑块速度与传送带速度的大小对比，动态分析受力方向和位移变化的过程。常见错误是直接使用单一方向一站式计算。",
+    difficultyAnalysis: "考核在传送带模型中，滑块速度与传送带速度的大小对比，动态分析受力方向 and 位移变化的过程。常见错误是直接使用单一方向一站式计算。",
     analogies: [
       {
         id: "1",
@@ -122,7 +100,7 @@ const PREDEFINED_ANALOGIES: Record<string, any> = {
         id: "2",
         questionText: "Please find a wide container ______ you can store these chemical liquids safely, and the specific guidelines ______ you must adhere should be kept visible.\nChoices:\nA. which; that   B. in which; to which   C. where; which   D. in where; of whom",
         answerText: "正确答案是 B。\n第一空：you can store chemical liquids in the container (store ... in...)，所以用 in which 或 where。\n第二空：the specific guidelines to which you must adhere (adhere to, 意为遵守，adhere 必须固定搭配介词 to)。所以 guidelines 与 to which 连用。因此搭配为 B (in which; to which)。",
-        explanationText: "本题常见错误是：\n1. **忽略固定短语搭配中的介词前置**（例如本题中 adhere to 的 to，极易错选为 which 或 and that）。\n2. 混淆状语和宾语成分。"
+        explanationText: "本题常见错误 is：\n1. **忽略固定短语搭配中的介词前置**（例如本题中 adhere to 的 to，极易错选为 which 或 and that）。\n2. 混淆状语和宾语成分。"
       },
       {
         id: "3",
@@ -134,14 +112,31 @@ const PREDEFINED_ANALOGIES: Record<string, any> = {
   }
 };
 
+function parseLLMResponse(text: string) {
+  const cleaned = text.trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (match) {
+      try {
+        return JSON.parse(match[1].trim());
+      } catch (err2) {
+        // ignore
+      }
+    }
+    throw new Error("模型返回的内容格式不符合规范，无法解析为 JSON: " + text);
+  }
+}
+
 // -------------------------------------------------------------
-// POST /api/ocr - Extract text using Gemini OCR or Fallback
+// POST /api/ocr - Extract text using Volcengine Vision or Fallback
 // -------------------------------------------------------------
 app.post("/api/ocr", async (req, res) => {
   try {
     const { imageBase64, sampleId } = req.body;
 
-    // If they picked a pre-loaded sample question to test quickly
+    // If they picked a preloaded sample
     if (sampleId) {
       const found = SAMPLE_OCR_QUESTIONS.find(q => q.id === sampleId);
       if (found) {
@@ -158,14 +153,15 @@ app.post("/api/ocr", async (req, res) => {
       return res.status(400).json({ success: false, error: "缺少图像数据 (imageBase64) 或样本ID" });
     }
 
-    const ai = getGeminiClient();
+    const apiKey = process.env.AIAPIKEY;
+    const baseUrl = process.env.AIBASEURL;
+    const model = process.env.AIMODEL;
 
-    if (!ai) {
-      console.warn("API key missing. Returning strict error Missing GEMINI_API_KEY.");
-      return res.status(400).json({ success: false, error: "Missing GEMINI_API_KEY" });
+    if (!apiKey || !baseUrl || !model) {
+      return res.status(400).json({ success: false, error: "Missing AIAPIKEY / AIBASEURL / AIMODEL" });
     }
 
-    // Extract raw base64 data (strip prefix if exists)
+    // Extract base64 details
     let mimeType = "image/png";
     let pureBase64 = imageBase64;
     const matches = imageBase64.match(/^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,(.+)$/);
@@ -173,36 +169,101 @@ app.post("/api/ocr", async (req, res) => {
       mimeType = matches[1];
       pureBase64 = matches[2];
     }
+    const fullImageUrl = imageBase64.startsWith("data:") ? imageBase64 : `data:${mimeType};base64,${pureBase64}`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: [
+    const visionPayload = {
+      model,
+      messages: [
         {
-          inlineData: {
-            mimeType,
-            data: pureBase64
-          }
-        },
-        {
-          text: "你是一位精通多学科解答的高精度学术型OCR助手。请识别并返回图片中的文字。如果包含物理、数学、化学公式或符号，请转换成标准的 LaTeX 格式（行内用 $...$, 独立行用 \\[ ... \\]）。不要作假，力求原文字字对应。如果识别不了或者图片不是题目，也请结合图片描述尽力返还其主要的结构和文字内容。请只输出识别好的题目文字，请勿夹带任何个人打招呼或无用的多余文字（例如“这是我为您识别的结果”等）。"
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "你是一位精通多学科解答的高精度学术型OCR助手。请识别并返回图片中的文字。如果包含物理、数学、化学公式或符号，请转换成标准的 LaTeX 格式（行内用 $...$, 独立行用 \\[ ... \\]）。不要作假，力求原文字字对应。如果识别不了或者图片不是题目，也请结合图片描述尽力返还其主要的结构和文字内容。请只输出识别好的题目文字，请勿夹带任何个人打招呼或无用的多余文字（例如“这是我为您识别的结果”等）。"
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: fullImageUrl
+              }
+            }
+          ]
         }
-      ]
+      ],
+      temperature: 0.1
+    };
+
+    const tokenUrl = baseUrl.endsWith("/") ? `${baseUrl}chat/completions` : `${baseUrl}/chat/completions`;
+    const ocrResponse = await fetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(visionPayload)
     });
 
-    const parsedText = response.text || "未能从该图片识别出题目。请点击手动输入或重试。";
+    if (!ocrResponse.ok) {
+      const status = ocrResponse.status;
+      let rawText = "";
+      let parsedError: any = null;
+      try {
+        rawText = await ocrResponse.text();
+        parsedError = JSON.parse(rawText);
+      } catch (e) {
+        // ignore
+      }
 
-    // Ask Gemini briefly to extract the main Knowledge point (knowledge target) in one short phrase
+      const errorObj = {
+        code: parsedError?.error?.code || parsedError?.code || "OCR_API_ERROR",
+        message: parsedError?.error?.message || parsedError?.message || rawText || "Volcengine API vision completion error",
+        status,
+        rawResponse: parsedError || rawText
+      };
+
+      console.error("Local OCR API Error:", errorObj);
+      return res.status(status).json({
+        success: false,
+        error: `火山方舟 API OCR报错: ${errorObj.message}`,
+        ...errorObj
+      });
+    }
+
+    const ocrData = await ocrResponse.json();
+    const parsedText = ocrData?.choices?.[0]?.message?.content || "未能从该图片识别出题目。请点击手动输入或重试。";
+
+    // Ask for knowledge point
     let knowledgePoint = "综合学科知识点";
     try {
-      const kpResponse = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: `基于以下题目文本，提炼出一个最准确的、高中/初中阶段的「学术知识点名称」（字数控制在15个字以内，例如：\"二次函数区间最值问题\" 或 \"等差数列前n项和规律\"）：\n\n${parsedText}`,
+      const kpPayload = {
+        model,
+        messages: [
+          {
+            role: "user",
+            content: `基于以下题目文本，提炼出一个最准确的、高中/初中阶段的「学术知识点名称」（字数控制在15个字以内，例如：\"二次函数区间最值问题\" 或 \"等差数列前n项和规律\"）：\n\n${parsedText}`
+          }
+        ],
+        temperature: 0.3
+      };
+
+      const kpResponse = await fetch(tokenUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(kpPayload)
       });
-      if (kpResponse.text) {
-        knowledgePoint = kpResponse.text.replace(/[\"'\s]+/g, "").trim();
+
+      if (kpResponse.ok) {
+        const kpData = await kpResponse.json();
+        const kpCont = kpData?.choices?.[0]?.message?.content;
+        if (kpCont) {
+          knowledgePoint = kpCont.replace(/[\"'\s]+/g, "").trim();
+        }
       }
     } catch (err) {
-      console.error("Error generating knowledge point:", err);
+      console.error("Error generating knowledge point locally:", err);
     }
 
     return res.json({
@@ -212,7 +273,7 @@ app.post("/api/ocr", async (req, res) => {
     });
 
   } catch (error: any) {
-    console.error("OCR API error:", error);
+    console.error("OCR API error locally:", error);
     return res.status(500).json({ success: false, error: error.message || "OCR 处理失败" });
   }
 });
@@ -228,38 +289,37 @@ app.post("/api/generate", async (req, res) => {
       return res.status(400).json({ success: false, error: "缺少原题目 (originalQuestion)" });
     }
 
-    // Check if it is one of our predefined samples, for instant offline performance or testing
     const matchedSampleKey = Object.keys(PREDEFINED_ANALOGIES).find(key => {
       const sampleQuestion = SAMPLE_OCR_QUESTIONS.find(s => s.id === key);
       return sampleQuestion && (originalQuestion.includes(sampleQuestion.content.slice(0, 15)) || (promptHint && promptHint.toLowerCase() === key));
     });
 
     if (matchedSampleKey) {
-      console.log("Found predefined offline response for:", matchedSampleKey);
       return res.json({
         success: true,
         data: PREDEFINED_ANALOGIES[matchedSampleKey]
       });
     }
 
-    const ai = getGeminiClient();
+    const apiKey = process.env.AIAPIKEY;
+    const baseUrl = process.env.AIBASEURL;
+    const model = process.env.AIMODEL;
 
-    if (!ai) {
-      console.warn("API key missing. Returning strict error Missing GEMINI_API_KEY.");
-      return res.status(400).json({ success: false, error: "Missing GEMINI_API_KEY" });
+    if (!apiKey || !baseUrl || !model) {
+      return res.status(400).json({ success: false, error: "Missing AIAPIKEY / AIBASEURL / AIMODEL" });
     }
 
-    const kp = knowledgePoint || "该物理/数学/英语核心考点";
+    const kp = knowledgePoint || "该核心考点";
     const cuePrompt = promptHint ? `用户附加的定制生成要求（例如难度、方向等）：\n"${promptHint}"\n` : "";
 
-    const userSystemInstruction = `你是一位教学经验极其丰富的国家级名师。你需要针对用户提供的「原错题」，推测或结合给定的「知识点」，生成 **3 道质量极高、难度相当或呈阶梯增量的相似变式题（举一反三题）**。
+    const systemInstruction = `你是一位教学经验极其丰富的国家级名师。你需要针对用户提供的「原错题」，推测或结合给定的「知识点」，生成 **3 道质量极高、难度相当或呈阶梯增量的相似变式题（举一反三题）**。
 
 请严格遵守以下教学逻辑和输出法则：
 1. **题目涵盖面**：3道题要分别对应此知识点的不同考察角度、变式形式或逆向思维，不能只是简单地更换一下原题的常数！题目的内容必须和原错题强相关，达到“举一反三”的训练效果。
 2. **公式规范**：使用标准的 LaTeX 格式编辑所有排版的物理、数学公式。行内公式使用 $...$，块级公式使用 \\[ ... \\]。
 3. **正确答案**：每道题排布详细正确的推演步骤和解题答案，切记物理、数学等理科题目不要胡编数字导致无法整除或无解！
-4. **易错点深度剖析**：必须给每一道题附带索引其“易错点”或“易混淆点”的精品解析（精确定位并使用「本题常见错误是...」这一具体语言范式）。高亮部分在前端我们会处理。
-5. **结构规范**：必须严格按照指定的 JSON 结构返回数据，确保数据在前端可以被无缝渲染。`;
+4. **易错点深度剖析**：必须给每一道题附带索引其“易错点”或“易混淆点”的精品解析（精确定位并使用「本题常见错误是...」或「容易错在...」这一具体语言范式）。
+5. **输出控制**：必须返回合法的 JSON 对象，不要含有任何 Markdown 的 \`\`\`json 格式封装，直接返回 JSON 对象。`;
 
     const userPrompt = `
 【原错题内容】：
@@ -270,50 +330,85 @@ ${kp}
 
 ${cuePrompt}
 
-请围绕该知识点在不同侧面进行变式拓展，生成3道高水准的举一反三题目并按照 JSON 规范输出。`;
+请围绕该知识点在不同侧面进行变式拓展，生成 3 道高水准的举一反三题目。
+请以下列指定的 JSON 结构返回：
+{
+  "knowledgePoint": "提炼出的规范学科知识点名称，不要带前后缀",
+  "difficultyAnalysis": "对这组错题考点的核心难点简评及命题陷阱分析",
+  "analogies": [
+    {
+      "id": "1",
+      "questionText": "题目具体题干文本（包含公式LaTeX）",
+      "answerText": "本题的正确答案及详细解答步骤",
+      "explanationText": "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段"
+    },
+    {
+      "id": "2",
+      "questionText": "题目具体题干文本（包含公式LaTeX）",
+      "answerText": "本题的正确答案及详细解答步骤",
+      "explanationText": "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段"
+    },
+    {
+      "id": "3",
+      "questionText": "题目具体题干文本（包含公式LaTeX）",
+      "answerText": "本题的正确答案及详细解答步骤",
+      "explanationText": "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段"
+    }
+  ]
+}`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: userPrompt,
-      config: {
-        systemInstruction: userSystemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          required: ["knowledgePoint", "difficultyAnalysis", "analogies"],
-          properties: {
-            knowledgePoint: {
-              type: Type.STRING,
-              description: "提炼出的规范学科知识点名称，不要带前后缀"
-            },
-            difficultyAnalysis: {
-              type: Type.STRING,
-              description: "对这组错题考点的核心难点简评及命题陷阱分析"
-            },
-            analogies: {
-              type: Type.ARRAY,
-              description: "三道变式举一反三题目",
-              items: {
-                type: Type.OBJECT,
-                required: ["id", "questionText", "answerText", "explanationText"],
-                properties: {
-                  id: { type: Type.STRING },
-                  questionText: { type: Type.STRING, description: "题目具体题干文本（包含公式LaTeX）" },
-                  answerText: { type: Type.STRING, description: "本题的正确答案及详细解答步骤" },
-                  explanationText: { type: Type.STRING, description: "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段" }
-                }
-              }
-            }
-          }
-        }
-      }
+    const tokenUrl = baseUrl.endsWith("/") ? `${baseUrl}chat/completions` : `${baseUrl}/chat/completions`;
+    const response = await fetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: userPrompt }
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.7
+      })
     });
 
-    const parsedData = JSON.parse(response.text.trim());
+    if (!response.ok) {
+      const status = response.status;
+      let rawText = "";
+      let parsedError: any = null;
+      try {
+        rawText = await response.text();
+        parsedError = JSON.parse(rawText);
+      } catch (e) {
+        // ignore
+      }
+
+      const errorObj = {
+        code: parsedError?.error?.code || parsedError?.code || "GENERATE_API_ERROR",
+        message: parsedError?.error?.message || parsedError?.message || rawText || "Volcengine API generation completion error",
+        status,
+        rawResponse: parsedError || rawText
+      };
+
+      console.error("Local Generate API Error:", errorObj);
+      return res.status(status).json({
+        success: false,
+        error: `火山方舟 API Generate报错: ${errorObj.message}`,
+        ...errorObj
+      });
+    }
+
+    const responseData = await response.json();
+    const resultText = responseData?.choices?.[0]?.message?.content || "";
+    const parsedData = parseLLMResponse(resultText);
+
     return res.json({ success: true, data: parsedData });
 
   } catch (error: any) {
-    console.error("Generate API error:", error);
+    console.error("Generate API error locally:", error);
     return res.status(500).json({ success: false, error: error.message || "生成举一反三失败" });
   }
 });

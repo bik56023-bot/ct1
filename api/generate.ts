@@ -1,5 +1,3 @@
-import { GoogleGenAI, Type } from "@google/genai";
-
 const SAMPLE_OCR_QUESTIONS = [
   {
     id: "sample_math",
@@ -90,6 +88,24 @@ const PREDEFINED_ANALOGIES: Record<string, any> = {
   }
 };
 
+function parseLLMResponse(text: string) {
+  const cleaned = text.trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    // Try to extract JSON from markdown code blocks
+    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (match) {
+      try {
+        return JSON.parse(match[1].trim());
+      } catch (err2) {
+        // ignore
+      }
+    }
+    throw new Error("模型返回的内容格式不符合规范，无法解析为 JSON: " + text);
+  }
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method === "OPTIONS") {
     res.status(200).end();
@@ -120,32 +136,26 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // Check all variations of API key names as required by user
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.API_KEY;
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-      return res.status(400).json({ success: false, error: "Missing GEMINI_API_KEY" });
-    }
+    // Checking key names strictly under user specification
+    const apiKey = process.env.AIAPIKEY;
+    const baseUrl = process.env.AIBASEURL;
+    const model = process.env.AIMODEL;
 
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
+    if (!apiKey || !baseUrl || !model) {
+      return res.status(400).json({ success: false, error: "Missing AIAPIKEY / AIBASEURL / AIMODEL" });
+    }
 
     const kp = knowledgePoint || "该核心考点";
     const cuePrompt = promptHint ? `用户附加的定制生成要求（例如难度、方向等）：\n"${promptHint}"\n` : "";
 
-    const userSystemInstruction = `你是一位教学经验极其丰富的国家级名师。你需要针对用户提供的「原错题」，推测或结合给定的「知识点」，生成 **3 道质量极高、难度相当或呈阶梯增量的相似变式题（举一反三题）**。
+    const systemInstruction = `你是一位教学经验极其丰富的国家级名师。你需要针对用户提供的「原错题」，推测或结合给定的「知识点」，生成 **3 道质量极高、难度相当或呈阶梯增量的相似变式题（举一反三题）**。
 
 请严格遵守以下教学逻辑和输出法则：
 1. **题目涵盖面**：3道题要分别对应此知识点的不同考察角度、变式形式或逆向思维，不能只是简单地更换一下原题的常数！题目的内容必须和原错题强相关，达到“举一反三”的训练效果。
 2. **公式规范**：使用标准的 LaTeX 格式编辑所有排版的物理、数学公式。行内公式使用 $...$，块级公式使用 \\[ ... \\]。
 3. **正确答案**：每道题排布详细正确的推演步骤和解题答案，切记物理、数学等理科题目不要胡编数字导致无法整除或无解！
-4. **易错点深度剖析**：必须给每一道题附带索引其“易错点”或“易混淆点”的精品解析（精确定位并使用「本题常见错误是...」这一具体语言范式）。高亮部分在前端我们会处理。
-5. **结构规范**：必须严格按照指定的 JSON 结构返回数据，确保数据在前端可以被无缝渲染。`;
+4. **易错点深度剖析**：必须给每一道题附带索引其“易错点”或“易混淆点”的精品解析（精确定位并使用「本题常见错误是...」或「容易错在...」这一具体语言范式）。
+5. **输出控制**：必须返回合法的 JSON 对象，不要含有任何 Markdown 的 \`\`\`json 格式封装，直接返回 JSON 对象。`;
 
     const userPrompt = `
 【原错题内容】：
@@ -156,46 +166,81 @@ ${kp}
 
 ${cuePrompt}
 
-请围绕该知识点在不同侧面进行变式拓展，生成3道高水准的举一反三题目并按照 JSON 规范输出。`;
+请围绕该知识点在不同侧面进行变式拓展，生成 3 道高水准的举一反三题目。
+请以下列指定的 JSON 结构返回：
+{
+  "knowledgePoint": "提炼出的规范学科知识点名称，不要带前后缀",
+  "difficultyAnalysis": "对这组错题考点的核心难点简评及命题陷阱分析",
+  "analogies": [
+    {
+      "id": "1",
+      "questionText": "题目具体题干文本（包含公式LaTeX）",
+      "answerText": "本题的正确答案及详细解答步骤",
+      "explanationText": "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段"
+    },
+    {
+      "id": "2",
+      "questionText": "题目具体题干文本（包含公式LaTeX）",
+      "answerText": "本题的正确答案及详细解答步骤",
+      "explanationText": "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段"
+    },
+    {
+      "id": "3",
+      "questionText": "题目具体题干文本（包含公式LaTeX）",
+      "answerText": "本题的正确答案及详细解答步骤",
+      "explanationText": "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段"
+    }
+  ]
+}`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: userPrompt,
-      config: {
-        systemInstruction: userSystemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          required: ["knowledgePoint", "difficultyAnalysis", "analogies"],
-          properties: {
-            knowledgePoint: {
-              type: Type.STRING,
-              description: "提炼出的规范学科知识点名称，不要带前后缀"
-            },
-            difficultyAnalysis: {
-              type: Type.STRING,
-              description: "对这组错题考点的核心难点简评及命题陷阱分析"
-            },
-            analogies: {
-              type: Type.ARRAY,
-              description: "三道变式举一反三题目",
-              items: {
-                type: Type.OBJECT,
-                required: ["id", "questionText", "answerText", "explanationText"],
-                properties: {
-                  id: { type: Type.STRING },
-                  questionText: { type: Type.STRING, description: "题目具体题干文本（包含公式LaTeX）" },
-                  answerText: { type: Type.STRING, description: "本题的正确答案及详细解答步骤" },
-                  explanationText: { type: Type.STRING, description: "易错点提示与深度解析。必须在此解析中使用'本题常见错误是'或'容易错在'开头的关键性诊断句段" }
-                }
-              }
-            }
-          }
-        }
-      }
+    const tokenUrl = baseUrl.endsWith("/") ? `${baseUrl}chat/completions` : `${baseUrl}/chat/completions`;
+    const response = await fetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: userPrompt }
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.7
+      })
     });
 
-    const parsedData = JSON.parse(response.text.trim());
+    if (!response.ok) {
+      const status = response.status;
+      let rawText = "";
+      let parsedError: any = null;
+      try {
+        rawText = await response.text();
+        parsedError = JSON.parse(rawText);
+      } catch (e) {
+        // ignore
+      }
+
+      const errorObj = {
+        code: parsedError?.error?.code || parsedError?.code || "GENERATE_API_ERROR",
+        message: parsedError?.error?.message || parsedError?.message || rawText || "Volcengine API generation completion error",
+        status,
+        rawResponse: parsedError || rawText
+      };
+
+      console.error("Generate API Error Response status:", status, errorObj);
+      return res.status(status).json({
+        success: false,
+        error: `火山方舟 API Generate报错: ${errorObj.message}`,
+        ...errorObj
+      });
+    }
+
+    const responseData = await response.json();
+    const resultText = responseData?.choices?.[0]?.message?.content || "";
+    const parsedData = parseLLMResponse(resultText);
+
     return res.status(200).json({ success: true, data: parsedData });
 
   } catch (error: any) {
